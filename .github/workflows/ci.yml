@@ -6,6 +6,9 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: trayectorias_movil
     steps:
       - uses: actions/checkout@v4
 
