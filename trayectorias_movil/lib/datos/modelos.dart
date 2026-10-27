@@ -154,7 +154,7 @@ class ArchivoElegido {
   /// Bytes.
   final int tamano;
 
-  static const tamanoMaximo = 20 * 1024 * 1024;
+  static const tamanoMaximo = 2 * 1024 * 1024;
   static const extensiones = ['pdf', 'jpg', 'jpeg', 'png'];
 
   String get extension => nombre.contains('.') ? nombre.split('.').last.toLowerCase() : '';
