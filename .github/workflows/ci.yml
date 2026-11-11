@@ -1,14 +1,18 @@
-name: Flutter CI
+name: CI Pipeline
 
+# Flujo: Push → Build → Análisis estático → Pruebas → Reporte → Aprobación
 on:
   push:
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: trayectorias_movil
 
 jobs:
-  test:
+  build:
+    name: 1. Build
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: trayectorias_movil
     steps:
       - uses: actions/checkout@v4
 
@@ -21,5 +25,154 @@ jobs:
       - name: Instalar dependencias
         run: flutter pub get
 
-      - name: Ejecutar pruebas
-        run: flutter test
+      - name: Build proyecto
+        run: |
+          flutter build web
+          mkdir artefactos
+          cp -r build/web artefactos/
+
+      - name: Generar ZIP
+        run: zip -r artefacto.zip artefactos
+
+      - name: Subir artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-flutter
+          path: trayectorias_movil/artefacto.zip
+
+  analisis:
+    name: 2. Análisis estático
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instalar Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Instalar dependencias
+        run: flutter pub get
+
+      - name: Revisar formato y errores (flutter analyze)
+        run: flutter analyze
+
+  pruebas:
+    name: 3. Pruebas y cobertura
+    needs: analisis
+    runs-on: ubuntu-latest
+    outputs:
+      aprobadas: ${{ steps.metricas.outputs.aprobadas }}
+      fallidas: ${{ steps.metricas.outputs.fallidas }}
+      cobertura: ${{ steps.metricas.outputs.cobertura }}
+      lineas: ${{ steps.metricas.outputs.lineas }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instalar Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Instalar dependencias
+        run: flutter pub get
+
+      - name: Ejecutar pruebas con cobertura
+        run: flutter test --coverage --file-reporter json:reporte-pruebas.json
+
+      - name: Calcular métricas
+        id: metricas
+        if: always()
+        run: |
+          python3 - <<'EOF' >> "$GITHUB_OUTPUT"
+          import json, os
+          ok = fail = 0
+          if os.path.exists('reporte-pruebas.json'):
+              for linea in open('reporte-pruebas.json'):
+                  e = json.loads(linea)
+                  if e.get('type') == 'testDone' and not e.get('hidden') and not e.get('skipped'):
+                      if e['result'] == 'success':
+                          ok += 1
+                      else:
+                          fail += 1
+          lf = lh = 0
+          if os.path.exists('coverage/lcov.info'):
+              for linea in open('coverage/lcov.info'):
+                  if linea.startswith('LF:'): lf += int(linea[3:])
+                  if linea.startswith('LH:'): lh += int(linea[3:])
+          print(f'aprobadas={ok}')
+          print(f'fallidas={fail}')
+          print(f'cobertura={100 * lh / lf if lf else 0:.2f}')
+          print(f'lineas={lh} de {lf}')
+          EOF
+          cat "$GITHUB_OUTPUT"
+
+      - name: Generar reporte HTML de cobertura
+        if: always()
+        run: |
+          sudo apt-get install -y lcov > /dev/null
+          genhtml coverage/lcov.info -o coverage/html --quiet
+
+      - name: Guardar reporte de cobertura
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: |
+            trayectorias_movil/coverage/lcov.info
+            trayectorias_movil/coverage/html
+
+      - name: Guardar reporte de pruebas
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-report
+          path: trayectorias_movil/reporte-pruebas.json
+
+  reporte:
+    name: 4. Reporte
+    needs: pruebas
+    if: always() && needs.pruebas.result != 'skipped'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generar reporte de ejecución
+        working-directory: .
+        run: |
+          {
+            echo "## Reporte de ejecución CI · Trayectorias Docentes (app móvil)"
+            echo ""
+            echo "| Métrica | Valor |"
+            echo "|---|---|"
+            echo "| Build | ✅ exitoso |"
+            echo "| Análisis estático | ✅ sin problemas |"
+            echo "| Pruebas aprobadas | ${{ needs.pruebas.outputs.aprobadas }} |"
+            echo "| Pruebas fallidas | ${{ needs.pruebas.outputs.fallidas }} |"
+            echo "| Cobertura de líneas | ${{ needs.pruebas.outputs.cobertura }} % (${{ needs.pruebas.outputs.lineas }}) |"
+            echo "| Commit | ${GITHUB_SHA::7} |"
+            echo "| Ejecución | #${{ github.run_number }} |"
+          } > reporte-ci.md
+          cat reporte-ci.md >> "$GITHUB_STEP_SUMMARY"
+          cat reporte-ci.md
+
+      - name: Guardar reporte
+        uses: actions/upload-artifact@v4
+        with:
+          name: reporte-ci
+          path: reporte-ci.md
+
+  aprobacion:
+    name: 5. Aprobación
+    needs: [pruebas, reporte]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Revisar criterios de calidad
+        working-directory: .
+        run: |
+          echo "Pruebas fallidas: ${{ needs.pruebas.outputs.fallidas }}"
+          echo "Cobertura: ${{ needs.pruebas.outputs.cobertura }} % (mínimo 70 %)"
+          python3 -c "import sys; sys.exit(0 if float('${{ needs.pruebas.outputs.cobertura }}') >= 70 and int('${{ needs.pruebas.outputs.fallidas }}') == 0 else 1)"
+          echo "✅ Cambio aprobado: cumple los criterios de calidad." >> "$GITHUB_STEP_SUMMARY"
+          echo "✅ Cambio aprobado"
